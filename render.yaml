@@ -1,0 +1,34 @@
+services:
+  - type: web
+    name: turismomundial-backend
+    env: python
+    plan: free
+    autoDeploy: true
+    buildCommand: pip install -r requirements.txt
+    startCommand: python manage.py migrate && gunicorn django_rest_main.wsgi:application --bind 0.0.0.0:$PORT
+    healthCheckPath: /api/v1/auth/ping/
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.11.9
+      - key: SECRET_KEY
+        generateValue: true
+      - key: DEBUG
+        value: "False"
+      - key: DATABASE_URL
+        fromDatabase:
+          name: turismomundial-db
+          property: connectionString
+      - key: ALLOWED_HOSTS
+        value: ".onrender.com,localhost,127.0.0.1"
+      - key: FRONTEND_URL
+        value: "https://scannivibe-frontend.vercel.app"
+      - key: CORS_ALLOWED_ORIGINS
+        value: "https://scannivibe-frontend.vercel.app"
+      - key: CORS_ALLOWED_ORIGIN_REGEXES
+        value: "^https://scannivibe-frontend-.*\\.vercel\\.app$"
+      - key: CSRF_TRUSTED_ORIGINS
+        value: "https://scannivibe-frontend.vercel.app"
+
+databases:
+  - name: turismomundial-db
+    plan: free
