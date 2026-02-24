@@ -1,5 +1,9 @@
 # locations/views.py
+import logging
+import time
 from django.db import transaction
+from django.db.models import Count, Max, Min
+from django.db.models.functions import TruncDay
 from django.utils import timezone
 from rest_framework import status, viewsets
 from rest_framework.permissions import AllowAny, IsAuthenticated
@@ -18,7 +22,10 @@ from .serializers import (
     CollectibleSerializer,
     FavoriteToggleSerializer,
     FavoriteSerializer,
+    HeatmapFilterSerializer,
 )
+
+logger = logging.getLogger(__name__)
 
 
 class MoodViewSet(viewsets.ReadOnlyModelViewSet):
@@ -65,6 +72,132 @@ class VibeMatchAPIView(APIView):
 
         match = calculate_vibe_match(request.user, location)
         return Response({"vibe_match": match}, status=status.HTTP_200_OK)
+
+
+class HeatmapAPIView(APIView):
+    permission_classes = (AllowAny,)
+
+    def get(self, request):
+        started_at = time.perf_counter()
+        raw_categories = []
+        for raw_value in request.query_params.getlist("category"):
+            raw_categories.extend(
+                [category.strip() for category in raw_value.split(",") if category.strip()]
+            )
+
+        source = request.query_params.get("source")
+        if source == "checkins":
+            source = "visits"
+
+        filter_payload = {
+            "source": source or "visits",
+            "threshold": request.query_params.get("threshold", 0),
+            "palette": request.query_params.get("palette", "viridis"),
+        }
+        from_query = request.query_params.get("from")
+        to_query = request.query_params.get("to")
+        if from_query:
+            filter_payload["from_datetime"] = from_query
+        if to_query:
+            filter_payload["to_datetime"] = to_query
+        if raw_categories:
+            filter_payload["category"] = raw_categories
+
+        filter_serializer = HeatmapFilterSerializer(data=filter_payload)
+        if not filter_serializer.is_valid():
+            elapsed_ms = round((time.perf_counter() - started_at) * 1000)
+            logger.warning(
+                "heatmap_fetch_error latency_ms=%s status=400 errors=%s",
+                elapsed_ms,
+                filter_serializer.errors,
+            )
+            return Response(
+                filter_serializer.errors, status=status.HTTP_400_BAD_REQUEST
+            )
+        filters = filter_serializer.validated_data
+
+        queryset = Visit.objects.filter(
+            location__status=Location.Status.APPROVED,
+            location__latitude__isnull=False,
+            location__longitude__isnull=False,
+        )
+
+        from_datetime = filters.get("from_datetime")
+        if from_datetime:
+            queryset = queryset.filter(checked_in_at__gte=from_datetime)
+
+        to_datetime = filters.get("to_datetime")
+        if to_datetime:
+            queryset = queryset.filter(checked_in_at__lte=to_datetime)
+
+        categories = filters.get("category")
+        if categories:
+            queryset = queryset.filter(location__category__in=categories)
+
+        threshold = filters.get("threshold", 0)
+        points_qs = (
+            queryset.annotate(timestamp=TruncDay("checked_in_at"))
+            .values(
+                "location_id",
+                "location__name",
+                "location__city",
+                "location__latitude",
+                "location__longitude",
+                "timestamp",
+            )
+            .annotate(value=Count("id"))
+            .filter(value__gte=threshold)
+            .order_by("timestamp", "location_id")
+        )
+
+        points = []
+        values = []
+        for point in points_qs:
+            value = point["value"]
+            values.append(value)
+            timestamp = point["timestamp"]
+            points.append(
+                {
+                    "value": value,
+                    "unit": "visits",
+                    "lat": float(point["location__latitude"]),
+                    "lng": float(point["location__longitude"]),
+                    "timestamp": timestamp.isoformat() if timestamp else None,
+                    "location": {
+                        "id": point["location_id"],
+                        "name": point["location__name"],
+                        "city": point["location__city"],
+                    },
+                }
+            )
+
+        aggregate = points_qs.aggregate(min=Min("value"), max=Max("value"))
+        response_payload = {
+            "points": points,
+            "min": aggregate["min"] if values else 0,
+            "max": aggregate["max"] if values else 0,
+            "normalizationMeta": {
+                "mode": "none",
+                "note": "Raw visit counts per location per day.",
+            },
+            "appliedFilters": {
+                "from": from_datetime.isoformat() if from_datetime else None,
+                "to": to_datetime.isoformat() if to_datetime else None,
+                "source": filters.get("source", "visits"),
+                "category": categories or [],
+                "threshold": threshold,
+                "palette": filters.get("palette", "viridis"),
+            },
+        }
+        elapsed_ms = round((time.perf_counter() - started_at) * 1000)
+        logger.info(
+            "heatmap_fetch_success latency_ms=%s points=%s threshold=%s categories=%s",
+            elapsed_ms,
+            len(points),
+            threshold,
+            ",".join(categories or []),
+        )
+        return Response(response_payload, status=status.HTTP_200_OK)
 
 
 class VisitCheckinAPIView(APIView):

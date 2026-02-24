@@ -93,3 +93,26 @@ class PromotionSerializer(serializers.ModelSerializer):
     class Meta:
         model = Promotion
         fields = ("id", "title", "is_active", "created_at")
+
+
+class HeatmapFilterSerializer(serializers.Serializer):
+    from_datetime = serializers.DateTimeField(required=False)
+    to_datetime = serializers.DateTimeField(required=False)
+    source = serializers.ChoiceField(required=False, choices=("visits",))
+    threshold = serializers.IntegerField(required=False, min_value=0, default=0)
+    palette = serializers.ChoiceField(
+        required=False, choices=("viridis", "cividis"), default="viridis"
+    )
+    category = serializers.ListField(
+        required=False,
+        child=serializers.ChoiceField(choices=Location.Category.values),
+    )
+
+    def validate(self, attrs):
+        start = attrs.get("from_datetime")
+        end = attrs.get("to_datetime")
+        if start and end and start > end:
+            raise serializers.ValidationError(
+                {"from": "from must be less than or equal to to."}
+            )
+        return attrs

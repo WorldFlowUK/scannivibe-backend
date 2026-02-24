@@ -1,5 +1,7 @@
+from datetime import timedelta
 from django.test import TestCase
 from django.contrib.auth.models import User
+from django.utils import timezone
 from rest_framework.test import APIClient
 from rest_framework import status
 
@@ -179,3 +181,98 @@ class LocationsAPITests(TestCase):
 
         # En este caso debería dar 100 (1/1 moods overlap), clamp 30..100
         self.assertTrue(res.data["vibe_match"] > 70)
+
+
+class HeatmapAPITests(TestCase):
+    def setUp(self):
+        self.client = APIClient()
+        self.user = User.objects.create_user(
+            username="heat-user",
+            email="heat@example.com",
+            password="pass12345",
+            is_active=True,
+        )
+
+        self.location_restaurant = Location.objects.create(
+            name="Heat Restaurant",
+            city="Santiago",
+            category=Location.Category.RESTAURANT,
+            status=Location.Status.APPROVED,
+            latitude=-33.4489,
+            longitude=-70.6693,
+            qr_code="HEAT-R1",
+        )
+        self.location_bar = Location.objects.create(
+            name="Heat Bar",
+            city="Santiago",
+            category=Location.Category.BAR,
+            status=Location.Status.APPROVED,
+            latitude=-33.4560,
+            longitude=-70.6483,
+            qr_code="HEAT-B1",
+        )
+
+        now = timezone.now()
+        # 2 visits on the same day/location -> value should aggregate to 2
+        Visit.objects.create(
+            user=self.user,
+            location=self.location_restaurant,
+            status=Visit.Status.COMPLETED,
+            checked_in_at=now - timedelta(hours=2),
+        )
+        Visit.objects.create(
+            user=self.user,
+            location=self.location_restaurant,
+            status=Visit.Status.COMPLETED,
+            checked_in_at=now - timedelta(hours=1),
+        )
+        # 1 visit for a different category/location
+        Visit.objects.create(
+            user=self.user,
+            location=self.location_bar,
+            status=Visit.Status.ACTIVE,
+            checked_in_at=now - timedelta(days=1),
+        )
+
+        self.heatmap_url = "/api/v1/heatmap/"
+
+    def test_heatmap_is_public_and_returns_contract(self):
+        res = self.client.get(self.heatmap_url)
+        self.assertEqual(res.status_code, status.HTTP_200_OK)
+
+        self.assertIn("points", res.data)
+        self.assertIn("min", res.data)
+        self.assertIn("max", res.data)
+        self.assertIn("normalizationMeta", res.data)
+        self.assertIn("appliedFilters", res.data)
+        self.assertEqual(res.data["normalizationMeta"]["mode"], "none")
+
+        self.assertTrue(len(res.data["points"]) >= 2)
+        first_point = res.data["points"][0]
+        self.assertIn("value", first_point)
+        self.assertIn("unit", first_point)
+        self.assertIn("lat", first_point)
+        self.assertIn("lng", first_point)
+        self.assertIn("timestamp", first_point)
+        self.assertEqual(first_point["unit"], "visits")
+
+    def test_heatmap_threshold_filters_low_values(self):
+        res = self.client.get(self.heatmap_url, {"threshold": 2})
+        self.assertEqual(res.status_code, status.HTTP_200_OK)
+
+        points = res.data["points"]
+        self.assertEqual(len(points), 1)
+        self.assertEqual(points[0]["value"], 2)
+        self.assertEqual(points[0]["location"]["id"], self.location_restaurant.id)
+
+    def test_heatmap_category_filter(self):
+        res = self.client.get(self.heatmap_url, {"category": "bar"})
+        self.assertEqual(res.status_code, status.HTTP_200_OK)
+        self.assertEqual(len(res.data["points"]), 1)
+        self.assertEqual(
+            res.data["points"][0]["location"]["id"], self.location_bar.id
+        )
+
+    def test_heatmap_invalid_palette_returns_400(self):
+        res = self.client.get(self.heatmap_url, {"palette": "rainbow"})
+        self.assertEqual(res.status_code, status.HTTP_400_BAD_REQUEST)
