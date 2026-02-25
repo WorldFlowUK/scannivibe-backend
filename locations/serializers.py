@@ -1,4 +1,3 @@
-from urllib import request
 from rest_framework import serializers
 from .models import Mood, Location, Visit, Collectible, Favorite, Promotion
 from .utils import calculate_vibe_match 
@@ -100,6 +99,10 @@ class HeatmapFilterSerializer(serializers.Serializer):
     to_datetime = serializers.DateTimeField(required=False)
     source = serializers.ChoiceField(required=False, choices=("visits",))
     threshold = serializers.IntegerField(required=False, min_value=0, default=0)
+    time_window = serializers.ChoiceField(
+        required=False,
+        choices=("15m", "1h", "24h"),
+    )
     palette = serializers.ChoiceField(
         required=False, choices=("viridis", "cividis"), default="viridis"
     )
@@ -114,5 +117,11 @@ class HeatmapFilterSerializer(serializers.Serializer):
         if start and end and start > end:
             raise serializers.ValidationError(
                 {"from": "from must be less than or equal to to."}
+            )
+        if attrs.get("time_window") and (start or end):
+            raise serializers.ValidationError(
+                {
+                    "time_window": "time_window cannot be combined with from/to filters."
+                }
             )
         return attrs

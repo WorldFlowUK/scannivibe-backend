@@ -214,24 +214,39 @@ class HeatmapAPITests(TestCase):
 
         now = timezone.now()
         # 2 visits on the same day/location -> value should aggregate to 2
-        Visit.objects.create(
+        visit_rest_1 = Visit.objects.create(
             user=self.user,
             location=self.location_restaurant,
             status=Visit.Status.COMPLETED,
-            checked_in_at=now - timedelta(hours=2),
         )
-        Visit.objects.create(
+        Visit.objects.filter(id=visit_rest_1.id).update(
+            checked_in_at=now - timedelta(hours=2)
+        )
+        visit_rest_2 = Visit.objects.create(
             user=self.user,
             location=self.location_restaurant,
             status=Visit.Status.COMPLETED,
-            checked_in_at=now - timedelta(hours=1),
+        )
+        Visit.objects.filter(id=visit_rest_2.id).update(
+            checked_in_at=now - timedelta(hours=1)
+        )
+        # 1 recent visit to validate short live windows.
+        visit_rest_3 = Visit.objects.create(
+            user=self.user,
+            location=self.location_restaurant,
+            status=Visit.Status.ACTIVE,
+        )
+        Visit.objects.filter(id=visit_rest_3.id).update(
+            checked_in_at=now - timedelta(minutes=5)
         )
         # 1 visit for a different category/location
-        Visit.objects.create(
+        visit_bar = Visit.objects.create(
             user=self.user,
             location=self.location_bar,
             status=Visit.Status.ACTIVE,
-            checked_in_at=now - timedelta(days=1),
+        )
+        Visit.objects.filter(id=visit_bar.id).update(
+            checked_in_at=now - timedelta(days=1)
         )
 
         self.heatmap_url = "/api/v1/heatmap/"
@@ -245,6 +260,8 @@ class HeatmapAPITests(TestCase):
         self.assertIn("max", res.data)
         self.assertIn("normalizationMeta", res.data)
         self.assertIn("appliedFilters", res.data)
+        self.assertIn("generated_at", res.data)
+        self.assertIn("request_id", res.data)
         self.assertEqual(res.data["normalizationMeta"]["mode"], "none")
 
         self.assertTrue(len(res.data["points"]) >= 2)
@@ -262,7 +279,7 @@ class HeatmapAPITests(TestCase):
 
         points = res.data["points"]
         self.assertEqual(len(points), 1)
-        self.assertEqual(points[0]["value"], 2)
+        self.assertEqual(points[0]["value"], 3)
         self.assertEqual(points[0]["location"]["id"], self.location_restaurant.id)
 
     def test_heatmap_category_filter(self):
@@ -276,3 +293,31 @@ class HeatmapAPITests(TestCase):
     def test_heatmap_invalid_palette_returns_400(self):
         res = self.client.get(self.heatmap_url, {"palette": "rainbow"})
         self.assertEqual(res.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("error", res.data)
+        self.assertEqual(res.data["error"]["code"], "INVALID_FILTERS")
+        self.assertIn("request_id", res.data)
+
+    def test_heatmap_time_window_filters_recent_points(self):
+        res = self.client.get(self.heatmap_url, {"time_window": "15m"})
+        self.assertEqual(res.status_code, status.HTTP_200_OK)
+
+        points = res.data["points"]
+        self.assertEqual(len(points), 1)
+        self.assertEqual(points[0]["location"]["id"], self.location_restaurant.id)
+        self.assertEqual(points[0]["value"], 1)
+        self.assertEqual(res.data["appliedFilters"]["time_window"], "15m")
+
+    def test_heatmap_time_window_cannot_be_combined_with_from_to(self):
+        now_iso = timezone.now().isoformat()
+        res = self.client.get(
+            self.heatmap_url,
+            {"time_window": "1h", "from": now_iso},
+        )
+        self.assertEqual(res.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(res.data["error"]["code"], "INVALID_FILTERS")
+        self.assertIn("time_window", res.data["error"]["details"])
+
+    def test_heatmap_uses_request_id_from_header(self):
+        res = self.client.get(self.heatmap_url, HTTP_X_REQUEST_ID="req-123")
+        self.assertEqual(res.status_code, status.HTTP_200_OK)
+        self.assertEqual(res.data["request_id"], "req-123")
