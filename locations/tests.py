@@ -54,6 +54,10 @@ class LocationsAPITests(TestCase):
         """POST /visits/checkin/ sin auth => 401."""
         res = self.client.post(self.checkin_url, {"qr_code": "QR123"}, format="json")
         self.assertEqual(res.status_code, status.HTTP_401_UNAUTHORIZED)
+        self.assertIn("error", res.data)
+        self.assertEqual(res.data["error"]["code"], "UNAUTHORIZED")
+        self.assertIn("request_id", res.data)
+        self.assertIn("X-Request-ID", res)
 
     def test_checkin_creates_visit_and_collectible_first_time(self):
         """Primer checkin: crea visita ACTIVE y collectible_awarded=True."""
@@ -321,3 +325,11 @@ class HeatmapAPITests(TestCase):
         res = self.client.get(self.heatmap_url, HTTP_X_REQUEST_ID="req-123")
         self.assertEqual(res.status_code, status.HTTP_200_OK)
         self.assertEqual(res.data["request_id"], "req-123")
+        self.assertEqual(res["X-Request-ID"], "req-123")
+
+    def test_heatmap_generates_and_returns_request_id_header(self):
+        res = self.client.get(self.heatmap_url)
+        self.assertEqual(res.status_code, status.HTTP_200_OK)
+        self.assertIn("X-Request-ID", res)
+        self.assertTrue(res["X-Request-ID"])
+        self.assertEqual(res.data["request_id"], res["X-Request-ID"])

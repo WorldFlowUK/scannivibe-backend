@@ -1,7 +1,6 @@
 # locations/views.py
 import logging
 import time
-import uuid
 from datetime import timedelta
 from django.db import transaction
 from django.db.models import Count, Max, Min
@@ -13,7 +12,7 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 from .utils import calculate_vibe_match
 
-from .models import Mood, Location, Visit, Collectible, Favorite, Review  # ✅ + Review
+from .models import Mood, Location, Visit, Collectible, Favorite, Review
 from .serializers import (
     MoodSerializer,
     LocationListSerializer,
@@ -26,6 +25,13 @@ from .serializers import (
     FavoriteSerializer,
     HeatmapFilterSerializer,
 )
+from api.error_utils import (
+    create_error_response,
+    get_request_id,
+    log_error,
+    ErrorResponseBuilder,
+    server_error,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -34,24 +40,6 @@ HEATMAP_TIME_WINDOWS = {
     "1h": timedelta(hours=1),
     "24h": timedelta(hours=24),
 }
-
-
-def _resolve_request_id(request):
-    return request.headers.get("X-Request-ID") or uuid.uuid4().hex
-
-
-def _error_response(*, code, message, details, request_id, status_code):
-    return Response(
-        {
-            "error": {
-                "code": code,
-                "message": message,
-                "details": details,
-            },
-            "request_id": request_id,
-        },
-        status=status_code,
-    )
 
 
 class MoodViewSet(viewsets.ReadOnlyModelViewSet):
@@ -104,7 +92,7 @@ class HeatmapAPIView(APIView):
     permission_classes = (AllowAny,)
 
     def get(self, request):
-        request_id = _resolve_request_id(request)
+        request_id = get_request_id(request)
         started_at = time.perf_counter()
         try:
             raw_categories = []
@@ -137,18 +125,18 @@ class HeatmapAPIView(APIView):
             filter_serializer = HeatmapFilterSerializer(data=filter_payload)
             if not filter_serializer.is_valid():
                 elapsed_ms = round((time.perf_counter() - started_at) * 1000)
-                logger.warning(
-                    "heatmap_fetch_error latency_ms=%s status=400 request_id=%s errors=%s",
-                    elapsed_ms,
-                    request_id,
-                    filter_serializer.errors,
-                )
-                return _error_response(
-                    code="INVALID_FILTERS",
-                    message="Invalid heatmap filters.",
-                    details=filter_serializer.errors,
+                log_error(
+                    "INVALID_FILTERS",
                     request_id=request_id,
-                    status_code=status.HTTP_400_BAD_REQUEST,
+                    latency_ms=elapsed_ms,
+                    errors=str(filter_serializer.errors),
+                )
+                return (
+                    ErrorResponseBuilder("INVALID_FILTERS")
+                    .with_message("Invalid heatmap filters.")
+                    .with_details(dict(filter_serializer.errors))
+                    .with_request_id(request_id)
+                    .build()
                 )
             filters = filter_serializer.validated_data
 
@@ -245,20 +233,15 @@ class HeatmapAPIView(APIView):
                 time_window,
             )
             return Response(response_payload, status=status.HTTP_200_OK)
-        except Exception:
+        except Exception as exc:
             elapsed_ms = round((time.perf_counter() - started_at) * 1000)
-            logger.exception(
-                "heatmap_fetch_error latency_ms=%s status=500 request_id=%s",
-                elapsed_ms,
-                request_id,
-            )
-            return _error_response(
-                code="HEATMAP_FETCH_FAILED",
-                message="Unable to fetch heatmap data.",
-                details={},
+            log_error(
+                "HEATMAP_FETCH_FAILED",
                 request_id=request_id,
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                latency_ms=elapsed_ms,
+                exception=str(exc),
             )
+            return server_error(request, "Unable to fetch heatmap data.")
 
 
 class VisitCheckinAPIView(APIView):

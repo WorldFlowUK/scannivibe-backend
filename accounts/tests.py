@@ -418,6 +418,14 @@ class UserProfileTests(TestCase):
         self.assertEqual(response.data["email"], "test@example.com")
         self.assertIn("is_email_verified", response.data)
 
+    def test_get_user_profile_without_auth_uses_standard_error_contract(self):
+        response = self.client.get(self.me_url)
+        self.assertEqual(response.status_code, status.HTTP_401_UNAUTHORIZED)
+        self.assertIn("error", response.data)
+        self.assertEqual(response.data["error"]["code"], "UNAUTHORIZED")
+        self.assertIn("request_id", response.data)
+        self.assertIn("X-Request-ID", response)
+
     def test_update_user_profile(self):
         """Test: PATCH /me actualiza first_name y last_name."""
         self.client.credentials(HTTP_AUTHORIZATION=f"Bearer {self.access_token}")
